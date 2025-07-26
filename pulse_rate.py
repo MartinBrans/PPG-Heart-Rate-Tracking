@@ -11,6 +11,8 @@
 # -----
 
 
+# https://github.com/scipy/scipy/blob/v1.11.2/scipy/signal/_peak_finding.py#L729-L1010
+
 # ### Code
 
 
@@ -44,11 +46,13 @@ filter_on = True # False to disable the scipy butterworth order 3 bandpass filte
 minBeats = 5 # For algorithms based on signal peak detection. Assuming 40 BPM or lower is impossible, 8 seconds window -> 5 beats at least
 
 # Peak detection parameters for scipy find_peaks on ppg time-based signal:
-findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code (troika dataset)
+# findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code by KJStrand (troika dataset)
+findPeaksArgsTime = {"prominence":6} # Fiddle for better perf on troika
 # findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
 
 # Peak detection parameters for scipy find_peaks on frequency signals (see FFT_Peak method)
-findPeaksArgsFreq = {"height":30, "distance":1}
+# Actually, KJStrand's implementation normalises the signal before applying fft, so probably no need for tweaks here
+findPeaksArgsFreq = {"height":30, "distance":1} # Parameters of the original github code by KJStrad (troika dataset)
 
 ### Parameters end ###
 
@@ -270,6 +274,9 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
     elif dataset == "capnobase" :
         Fs = 300
         ppg, ref = LoadCapnobaseDataFile(data_fl, ref_fl)
+        accx = np.zeros_like(ppg)
+        accy = accx
+        accz = accx
     else :
         print("Unknown dataset")
         exit(1)
@@ -278,7 +285,7 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
     winShift = 2*Fs # Successive ground truth windows overlap by 2 seconds
     errs = []
     confs = []
-    truths = []
+    trths = []
     
     # For each 8 second window, compute a predicted BPM and confidence and compare to ground truth
     offset = 0
@@ -286,11 +293,14 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
     # minBPM = 300
     # maxBPM = 0
     if dataset == "troika":
-        nWindows = range(len(ref['BPM0']))
+        nWindows = len(ref['BPM0'])
     elif dataset == "capnobase":
         nWindows = len(ppg)//winSize
+    else :
+        print("Unknown dataset")
+        exit(1)
 
-    for eval_window_idx in nWindows:
+    for eval_window_idx in range(nWindows):
         
         # Set verbose to True to visualize plot analysis
         verbose = False
@@ -314,20 +324,33 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
             #   print(data_fl)
             #   print(eval_window_idx)
         except RuntimeWarning: # Heartpy being annoying
+            print("Runtime warning")
             print(data_fl)
             print(eval_window_idx)
             pred = 0
             conf = -3e6
         except hp.exceptions.BadSignalWarning: # Heartpy being really annoying
+            print("Bad signal warning")
+            print(data_fl)
+            print(eval_window_idx)
+            pred = 0
+            conf = -3e6
+        except:
+            print("Other error")
             print(data_fl)
             print(eval_window_idx)
             pred = 0
             conf = -3e6
         
         if dataset == "capnobase":
-            groundTruthBPM = np.mean(ref[2,(ref[1,:] >= window_start/Fs) & (ref[1,:] < window_end/Fs)])
+            refWindow = ref[1,(ref[0,:] >= window_start/Fs) & (ref[0,:] < window_end/Fs)]
+            if len(refWindow) == 0 : continue
+            groundTruthBPM = np.mean(refWindow)
         elif dataset == "troika":
             groundTruthBPM = ref['BPM0'][eval_window_idx][0]
+        else :
+            print("Unknown dataset")
+            exit(1)
 
         if verbose:
             print('Ground Truth BPM: ', groundTruthBPM)
@@ -336,11 +359,11 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
 
         predError = groundTruthBPM - pred
         errs.append(predError)
-        truths.append(groundTruthBPM)
+        trths.append(groundTruthBPM)
         confs.append(conf)
 
     # print("min, max: ", minBPM, " ", maxBPM)
-    errors, truths, confidence = np.array(errs), np.array(truths), np.array(confs)
+    errors, truths, confidence = np.array(errs), np.array(trths), np.array(confs)
     return errors, truths, confidence
 
 def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
@@ -355,7 +378,8 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             prediction: Tuple of (BPM prediction, confidence) for this window.
     '''
     
-    global findPeaksArgs
+    global findPeaksArgsTime
+    global findPeaksArgsFreq
     global filter_on
     if filter_on:
         ppg_bandpass = BandpassFilter(ppg, fs=Fs)
@@ -453,7 +477,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             print("Use peak: ", use_peak)
             print(f"Predicted BPM: {prediction}, {chosen_freq} (Hz), Confidence: {confidence}")
 
-    if method == "FFT_Peak_Acc":
+    elif method == "FFT_Peak_Acc":
 
         peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0]
     
@@ -538,7 +562,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             confidence = 1 # more intervals means more confidence -> actually punishes low BPMs for no reason
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
-    elif method == "Peaktime_diff_PostConversion":
+    elif method == "Peaktime_diff_PostMean":
         peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0] # Peaks are expressed as indices
         if len(peaks) < minBeats : 
             # print("insufficient peaks")
@@ -562,7 +586,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
     elif method == "2thresh":
         lowerThreshold = 0.0
-        upperThreshold = 10
+        upperThreshold = np.max(ppg_bandpass)*0.5
         beatStarted = False
         beatComplete = False
         lastTime = 0
@@ -589,9 +613,9 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             prediction = 0
             confidence = 0.0
 
-    elif method == "2thresh_PostConversion":
+    elif method == "2thresh_PostMean":
         lowerThreshold = 0.0
-        upperThreshold = 10
+        upperThreshold = np.max(ppg_bandpass)*0.5
         beatStarted = False
         beatComplete = False
         lastTime = 0
@@ -620,7 +644,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
     elif method == "2thresh_Median":
         lowerThreshold = 0.0
-        upperThreshold = 10
+        upperThreshold = np.max(ppg_bandpass)*0.5
         beatStarted = False
         beatComplete = False
         lastTime = 0
@@ -712,7 +736,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                         green_ac_mag,HRbpm2,SpO2B,DRdy)
                 
                 if DRdy.value == 1 :
-                    prediction += HRbpm2.value*Fs/100
+                    prediction += HRbpm2.value#*Fs/100
                     nPredictions += 1
 
             if nPredictions > 0 :
@@ -779,7 +803,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                 
                 if DRdy.value == 1 :
                     # prediction += HRbpm2.value
-                    prediction.append(HRbpm2.value*Fs/100)
+                    prediction.append(HRbpm2.value)#*Fs/100)
                     nPredictions += 1
 
             if nPredictions > 0 :
@@ -793,14 +817,20 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
     elif method == "HeartPy" :
 
-        # hp_filtered_ppg = hp.hampel_correcter(ppg,Fs)
-        # hp_filtered_ppg = hp.filter_signal(ppg,[0.7, 3.5],sample_rate=Fs,order=3,filtertype="bandpass")
-        # hp_filtered_ppg = hp.enhance_peaks(hp_filtered_ppg,iterations=1)
+        hp_preproc_ppg = hp.scale_data(ppg_bandpass)
+        # hp_preproc_ppg = hp.hampel_correcter(ppg,Fs)
+        # hp_preproc_ppg = hp.filter_signal(hp_preproc_ppg,[0.5, 6],sample_rate=Fs,order=3,filtertype="bandpass")
+        # hp_preproc_ppg = hp.enhance_peaks(hp_preproc_ppg,iterations=2)
 
-        # _, m = hp.process(hp_filtered_ppg, Fs)
-        _, m = hp.process(ppg_bandpass, Fs)
+
+        _, m = hp.process(hp_preproc_ppg, Fs)
         prediction = m["bpm"]
-        confidence = -3e6 if np.isnan(prediction) else -m["sdsd"]*m["bpm"]
+        confidence = -m["sdsd"]*m["bpm"]
+        if np.isnan(m["bpm"]) :
+            prediction = 0
+            confidence = -3e6
+        elif np.ma.isMA(m["sdsd"]):
+            confidence = -2e6
         # hp.plotter(wd,m)
         # plt.show()
         
@@ -808,6 +838,10 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
     elif method == "random":
         prediction = random.uniform(40,240)
         confidence = 1
+
+    else :
+        print("Unknown method")
+        exit(1)
 
         
     return (prediction, confidence)
@@ -887,7 +921,7 @@ print(f" Method : {method} =====\n", "MAE is: ", MAE)
 method = "Peaktime_diff" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
 MAE = Evaluate(method)
 print(f" Method : {method} =====\n", "MAE is: ", MAE)
-method = "Peaktime_diff_PostConversion" # Compute the mean time difference between peak occurences and convert it to a BPM
+method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
 MAE = Evaluate(method)
 print(f" Method : {method} =====\n", "MAE is: ", MAE)
 method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
@@ -896,7 +930,7 @@ print(f" Method : {method} =====\n", "MAE is: ", MAE)
 method = "2thresh" # Compute BPM values based on the duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again), take the mean of the BPM values
 MAE = Evaluate(method)
 print(f" Method : {method} =====\n", "MAE is: ", MAE)
-method = "2thresh_PostConversion" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
+method = "2thresh_PostMean" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
 MAE = Evaluate(method)
 print(f" Method : {method} =====\n", "MAE is: ", MAE)
 method = "2thresh_Median" # Compute the median duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
@@ -914,9 +948,9 @@ print(f" Method : {method} =====\n", "MAE is: ", MAE)
 method = "HeartPy" # HeartPy library
 MAE = Evaluate(method)
 print(f" Method : {method} =====\n", "MAE is: ", MAE)
-method = "random" # Pick a BPM at random between 40 and 240 BPM
-MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+# method = "random" # Pick a BPM at random between 40 and 240 BPM
+# MAE = Evaluate(method)
+# print(f" Method : {method} =====\n", "MAE is: ", MAE)
 
 
 exit(0)
@@ -931,23 +965,24 @@ exit(0)
 data_fls, ref_fls = LoadTroikaDataset()
 
 # CHOOSE FILE
-file_num = 1
+file_num = 3
 
 data_fl, ref_fl = list(zip(data_fls, ref_fls))[file_num:file_num+1][0]
 
 # Load data using LoadTroikaDataFile
 Fs = 125 # Troika data has sampling rate of 125 Hz
 ppg, accx, accy, accz = LoadTroikaDataFile(data_fl)
+# print(data_fl)
 ref = sp.io.loadmat(ref_fl)
 
 winSize = 8*Fs # Ground truth BPM provided in 8 second windows
 winShift = 2*Fs # Successive ground truth windows overlap by 2 seconds
 
 # CHOOSE WINDOW IN FILE
-eval_window_idx = 28
+eval_window_idx = 58
 
 # Choose method
-method = "random"
+method = "HeartPy"
 
 
 offset = eval_window_idx*winShift
@@ -963,7 +998,11 @@ accx_window = accx[window_start:window_end]
 accy_window = accy[window_start:window_end]
 accz_window = accz[window_start:window_end]
 
-pred, conf = AnalyzeWindow(ppg_window, accx_window, accy_window, accz_window, method, Fs=Fs, verbose=True)
+# plt.figure()
+# plt.plot(ppg_window)
+# plt.savefig("./buggy_window.pdf")
+
+pred, conf = AnalyzeWindow(ppg_window, accx_window, accy_window, accz_window, method, Fs=Fs, verbose=False)
 
 groundTruthBPM = ref['BPM0'][eval_window_idx][0]
 print('Ground Truth BPM: ', groundTruthBPM)
