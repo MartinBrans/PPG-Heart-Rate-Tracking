@@ -3,11 +3,11 @@
 # 
 # ### Dataset
 # **Troika**[1] dataset is used to develop the motion-compensated pulse rate algorithm.
+# **Capnobase** is used to confirm that an algorithm works on 
 # 
 # 1. Zhilin Zhang, Zhouyue Pi, Benyuan Liu, ‘‘TROIKA: A General Framework for Heart Rate Monitoring Using Wrist-Type Photoplethysmographic Signals During Intensive Physical Exercise,’’IEEE Trans. on Biomedical Engineering, vol. 62, no. 2, pp. 522-531, February 2015. Link
 # 
-# ### Capnobase
-# W. Karlen, S. Raman, J. M. Ansermino and G. A. Dumont, "Multiparameter Respiratory Rate Estimation From the Photoplethysmogram," in IEEE Transactions on Biomedical Engineering, vol. 60, no. 7, pp. 1946-1953, July 2013, doi: 10.1109/TBME.2013.2246160.
+# 2. W. Karlen, S. Raman, J. M. Ansermino and G. A. Dumont, "Multiparameter Respiratory Rate Estimation From the Photoplethysmogram," in IEEE Transactions on Biomedical Engineering, vol. 60, no. 7, pp. 1946-1953, July 2013, doi: 10.1109/TBME.2013.2246160.
 # -----
 
 
@@ -20,13 +20,11 @@ import glob
 
 import numpy as np
 import scipy as sp
-import scipy.io
 
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 import pandas as pd
 import random
-import math
 import ctypes
 
 import heartpy as hp
@@ -39,20 +37,22 @@ import heartpy as hp
 
 # dataset = "capnobase"
 dataset = "troika"
-plotResults = False
+plotResults = True
 
 # Algo parameters
-filter_on = True # False to disable the scipy butterworth order 3 bandpass filter on ppg and acc signals
-minBeats = 5 # For algorithms based on signal peak detection. Assuming 40 BPM or lower is impossible, 8 seconds window -> 5 beats at least
+scaling_on = False # True to enable a simple signal scaling on the ppg and acc signals, substracting the mean then dividing by (max-min)
+filter_on = True # True to enable a scipy butterworth order 3 bandpass filter on ppg and acc signals
+minBeats = 2 # For algorithms based on signal peak detection. Assuming 40 BPM or lower is impossible, 8 seconds window -> 5 beats at least
 
 # Peak detection parameters for scipy find_peaks on ppg time-based signal:
 # findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code by KJStrand (troika dataset)
-findPeaksArgsTime = {"prominence":6} # Fiddle for better perf on troika
-# findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
+# findPeaksArgsTime = {"prominence":9} # Fiddle for better perf on troika
+findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
+# findPeaksArgsTime = {"prominence":3} # Parameters testing with scaling on
 
 # Peak detection parameters for scipy find_peaks on frequency signals (see FFT_Peak method)
 # Actually, KJStrand's implementation normalises the signal before applying fft, so probably no need for tweaks here
-findPeaksArgsFreq = {"height":30, "distance":1} # Parameters of the original github code by KJStrad (troika dataset)
+findPeaksArgsFreq = {"height":30, "distance":1} # Parameters of the original github code by KJStrand (troika dataset)
 
 ### Parameters end ###
 
@@ -145,16 +145,17 @@ def AggregateErrorMetric(pr_errors, gnd_truths, confidence_est):
     """
     # Higher confidence means a better estimate. The best 90% of the estimates
     #    are above the 10th percentile confidence.
-    percentile90_confidence = np.percentile(confidence_est, 10)
+    # percentile90_confidence = np.percentile(confidence_est, 10)
 
     # Find the errors of the best pulse rate estimates
-    best_estimates = pr_errors[confidence_est >= percentile90_confidence]
-    best_truths = gnd_truths[confidence_est >= percentile90_confidence]
+    # best_estimates = pr_errors[confidence_est >= percentile90_confidence]
+    # best_truths = gnd_truths[confidence_est >= percentile90_confidence]
 
     # return np.mean(np.abs(best_estimates)) # Mean absolute error
     # return np.sqrt(np.mean(best_estimates**2)) # RMS
     # return np.mean(100*np.abs(best_estimates)/best_truths) # in percents
-    return (np.mean(np.abs(best_estimates)),np.mean(np.abs(best_estimates)/best_truths)) # both
+    # return (np.mean(np.abs(best_estimates)),np.mean(np.abs(best_estimates)/best_truths)) # both
+    return (np.mean(np.abs(pr_errors)),np.mean(np.abs(pr_errors)/gnd_truths)) # both but without the 90 percentile shit
     # return (np.median(np.abs(best_estimates)),np.median(np.abs(best_estimates)/best_truths)) # both medians
     # return (np.std(best_estimates),np.std(best_estimates/best_truths)) # both stds
 
@@ -190,31 +191,64 @@ def Evaluate(method):
     errs = np.hstack(errs)
     trths = np.hstack(trths)
     confs = np.hstack(confs)
+    preds = errs + trths
     errsPercent = errs * 100 / trths
-    percentile90_confidence = np.percentile(confs, 10)
-    errMean = np.mean(errs[confs >= percentile90_confidence])
-    errSTD = np.std(errs[confs >= percentile90_confidence])
-    # Method sanity check -> ideally the mean error is close to 0 if the algorithm is unbiased (actually it doesn't work well)
+    # percentile90_confidence = np.percentile(confs, 10)
+    # errMean = np.mean(errs[confs >= percentile90_confidence])
+    # errSTD = np.std(errs[confs >= percentile90_confidence])
+    errMean = np.mean(errs)
+    errSTD = np.std(errs)
+    # Method sanity check -> ideally the mean error is close to 0 if the algorithm is unbiased
     # print(f"Mean error: {np.mean(errs):.3f} BPM")
 
     # Plots
     if plotResults :
         plt.figure() # Error BPM vs ground truth BPM
-        plt.plot(trths[confs >= percentile90_confidence], errs[confs >= percentile90_confidence], '.b')
-        plt.plot(trths[confs < percentile90_confidence], errs[confs < percentile90_confidence], 'xr')
-        plt.hlines([errMean-1.96*errSTD,errMean,errMean+1.96*errSTD],xmin=60,xmax=180,colors="g",linestyles="dashed")
+        plt.plot(trths, errs,linestyle="None",marker=".",color=(0,0,0.9,0.4))
+        # plt.plot(trths[confs >= percentile90_confidence], errs[confs >= percentile90_confidence],linestyle="None",marker=".",color=(0,0,0.9,0.5))
+        # plt.plot(trths[confs < percentile90_confidence], errs[confs < percentile90_confidence], linestyle="None", marker="x",color=(0.9,0,0,1))
+        plt.hlines([errMean],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0.9,0,0,0.7),linestyles="dashdot",label="$\mu$")
+        plt.hlines([errMean-1.96*errSTD,errMean+1.96*errSTD],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0.9,0,0,0.7),linestyles="dotted",label="$\mu \pm 1.96 \sigma$")
+        # plt.hlines([errMean-1.96*errSTD,errMean+1.96*errSTD],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0,0.7,0.75,1),linestyles="dotted")
+        # plt.hlines([errMean],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0,0.7,0.75,1),linestyles="dashdot")
+        plt.plot([0,np.max(trths)+10],[0,-np.max(trths)-10],label="$HR_{pred} = 0$",color=(0,0.7,0,0.7))
+        plt.xlim(left=np.min(trths)-10,right=np.max(trths)+10)
+        plt.ylim(bottom=np.min(errs)-15,top=np.max(errs)+15)
         plt.grid()
         plt.xlabel("Ground truth HR [BPM]")
-        plt.ylabel("Error [BPM]")
+        plt.ylabel("Error ($HR_{pred}-HR_{true}$) [BPM]")
+        plt.legend()
+        plt.title(f"{method}: Error vs. Ground Truth HR")
         plt.savefig(f"./images/Err_{method}.pdf")
+        plt.close()
+
+        plt.figure() # Error BPM vs ground truth BPM
+        plt.plot(trths, preds,linestyle="None",marker=".",color=(0,0,0.9,0.5))
+        # plt.plot(trths[confs >= percentile90_confidence], errs[confs >= percentile90_confidence],linestyle="None",marker=".",color=(0,0,0.9,0.5))
+        # plt.plot(trths[confs < percentile90_confidence], errs[confs < percentile90_confidence], linestyle="None", marker="x",color=(0.9,0,0,1))
+        # plt.hlines([errMean],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0.9,0,0,0.7),linestyles="dashdot",label="$\mu$")
+        # plt.hlines([errMean-1.96*errSTD,errMean+1.96*errSTD],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0.9,0,0,0.7),linestyles="dotted",label="$\mu \pm 1.96 \sigma$")
+        # plt.hlines([errMean-1.96*errSTD,errMean+1.96*errSTD],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0,0.7,0.75,1),linestyles="dotted")
+        # plt.hlines([errMean],xmin=np.min(trths)-10,xmax=np.max(trths)+10,colors=(0,0.7,0.75,1),linestyles="dashdot")
+        plt.plot([0,np.max(preds)+10],[0,np.max(preds)+10],label="Error = 0",color=(0,0.7,0,0.4))
+        plt.xlim(left=np.min(trths)-10,right=np.max(trths)+10)
+        plt.ylim(bottom=np.min(preds)-15,top=np.max(preds)+15)
+        plt.grid()
+        plt.xlabel("Ground truth HR [BPM]")
+        plt.ylabel("Prediction [BPM]")
+        plt.legend()
+        plt.title(f"{method}: Prediction vs. Ground Truth HR")
+        plt.savefig(f"./images/Pred_{method}.pdf")
         plt.close()
         
         plt.figure() # Error % vs ground truth BPM
-        plt.plot(trths[confs >= percentile90_confidence], errsPercent[confs >= percentile90_confidence], '.b')
-        plt.plot(trths[confs < percentile90_confidence], errsPercent[confs < percentile90_confidence], 'xr')
+        # plt.plot(trths[confs >= percentile90_confidence], errsPercent[confs >= percentile90_confidence],linestyle="None",marker=".",color=(0,0,0.9,0.5))
+        # plt.plot(trths[confs < percentile90_confidence], errsPercent[confs < percentile90_confidence], linestyle="None", marker="x",color=(0.9,0,0,1))
+        plt.plot(trths, errsPercent,linestyle="None",marker=".",color=(0,0,0.9,0.5))
         plt.grid()
         plt.xlabel("Ground truth HR [BPM]")
         plt.ylabel("Error [%]")
+        plt.title(f"{method}")
         plt.savefig(f"./images/PErr_{method}.pdf")
         plt.close()
 
@@ -223,6 +257,7 @@ def Evaluate(method):
         plt.grid()
         plt.xlabel("Error [BPM]")
         plt.ylabel("Occurences")
+        plt.title(f"{method}")
         plt.savefig(f"./images/Hist_{method}.pdf")
         plt.close()
 
@@ -231,6 +266,7 @@ def Evaluate(method):
         plt.grid()
         plt.xlabel("Error [BPM]")
         plt.ylabel("Occurences")
+        plt.title(f"{method}")
         plt.savefig(f"./images/ZHist_{method}.pdf")
         plt.close()
 
@@ -239,14 +275,16 @@ def Evaluate(method):
         plt.grid()
         plt.xlabel("Error [%]")
         plt.ylabel("Occurences")
+        plt.title(f"{method}")
         plt.savefig(f"./images/PHist_{method}.pdf")
         plt.close()
 
         plt.figure() # Zommed histogram error %
-        plt.hist(errsPercent[np.abs(errsPercent	) < 30],20)
+        plt.hist(errsPercent[np.abs(errsPercent) < 30],20)
         plt.grid()
         plt.xlabel("Error [%]")
         plt.ylabel("Occurences")
+        plt.title(f"{method}")
         plt.savefig(f"./images/PZHist_{method}.pdf")
         plt.close()
 
@@ -263,7 +301,6 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
            errors: numpy array with differences between predicted and reference heart rates
            confidence: numpy array with confidence values for heart rate predictions
     '''
-    # Load data using LoadTroikaDataFile
     
     global dataset
     if dataset == "troika" :
@@ -272,8 +309,9 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
         ref = sp.io.loadmat(ref_fl)
         
     elif dataset == "capnobase" :
-        Fs = 300
+        Fs = 300 #//2
         ppg, ref = LoadCapnobaseDataFile(data_fl, ref_fl)
+        # ppg = ppg[::2]
         accx = np.zeros_like(ppg)
         accy = accx
         accz = accx
@@ -295,7 +333,9 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
     if dataset == "troika":
         nWindows = len(ref['BPM0'])
     elif dataset == "capnobase":
-        nWindows = len(ppg)//winSize
+        if len(ppg) < winSize : # Just a check but shouldn't happen
+            return [],[],[]
+        nWindows = (len(ppg)-winSize)//winShift + 1
     else :
         print("Unknown dataset")
         exit(1)
@@ -323,7 +363,7 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
             # if conf < 0.0001 : 
             #   print(data_fl)
             #   print(eval_window_idx)
-        except RuntimeWarning: # Heartpy being annoying
+        except RuntimeWarning: # Heartpy being annoying, requires the warnings turned into errors (see imports at the top)
             print("Runtime warning")
             print(data_fl)
             print(eval_window_idx)
@@ -335,6 +375,8 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
             print(eval_window_idx)
             pred = 0
             conf = -3e6
+        except KeyboardInterrupt:
+            exit(1)
         except:
             print("Other error")
             print(data_fl)
@@ -357,7 +399,7 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
         # if groundTruthBPM < minBPM : minBPM = groundTruthBPM
         # if groundTruthBPM > maxBPM : maxBPM = groundTruthBPM
 
-        predError = groundTruthBPM - pred
+        predError = pred - groundTruthBPM
         errs.append(predError)
         trths.append(groundTruthBPM)
         confs.append(conf)
@@ -381,6 +423,14 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
     global findPeaksArgsTime
     global findPeaksArgsFreq
     global filter_on
+    global scaling_on
+
+    if scaling_on:
+        ppg = ScaleSignal(ppg)
+        accx = ScaleSignal(accx)
+        accy = ScaleSignal(accy)
+        accz = ScaleSignal(accz)
+
     if filter_on:
         ppg_bandpass = BandpassFilter(ppg, fs=Fs)
         accx_bandpass = BandpassFilter(accx, fs=Fs)
@@ -580,7 +630,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             prediction = 0
             confidence = 0
         else :
-            prediction = Fs/np.median(np.diff(peaks)) * 60
+            prediction = Fs/np.median(np.diff(peaks),overwrite_input=True) * 60
             confidence = 1
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
@@ -663,7 +713,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             if ppg_bandpass[i] > upperThreshold and beatStarted :
                 beatComplete = True
         if nBeats > minBeats : 
-            prediction = Fs / np.median(prediction) * 60
+            prediction = Fs / np.median(prediction,overwrite_input=True) * 60
             confidence = 1
             # confidence = 1 - 1/(nBeats+1) # more beats means more confidence -> actually punishes low BPMs for no reason, so do not use this
         else : 
@@ -807,7 +857,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                     nPredictions += 1
 
             if nPredictions > 0 :
-                prediction = np.median(prediction)
+                prediction = np.median(prediction,overwrite_input=True)
                 confidence = 1 - 1/(nPredictions+1) # more predictions means more confidence -> actually punishes low BPMs for no reason, so do not use this
                 # confidence = 1
             else :
@@ -845,6 +895,12 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
         
     return (prediction, confidence)
+
+def ScaleSignal(x):
+    x -= np.mean(x)
+    if abs(max(x)-min(x)) > 1e-9 :
+        return x/(max(x)-min(x))
+    return x 
 
 def BandpassFilter(signal, fs):
     '''Bandpass filter the signal between 40 and 240 BPM'''
@@ -914,43 +970,43 @@ def CalcConfidence(chosen_freq, freqs, fft_ppg):
 
 method = "FFT_Peak" # Apply FFT on the window and select most present frequency, convert this frequency to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "Peaktime_diff" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "2thresh" # Compute BPM values based on the duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again), take the mean of the BPM values
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "2thresh_PostMean" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "2thresh_Median" # Compute the median duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "NumberOfPeaks" # Compute the number of peaks in the window and convert it to a BPM using the length of the window
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "MAX FTHR" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "MAX FTHR Median" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff, take the median of the predictions
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "HeartPy" # HeartPy library
 MAE = Evaluate(method)
-print(f" Method : {method} =====\n", "MAE is: ", MAE)
-# method = "random" # Pick a BPM at random between 40 and 240 BPM
-# MAE = Evaluate(method)
-# print(f" Method : {method} =====\n", "MAE is: ", MAE)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "random" # Pick a BPM at random between 40 and 240 BPM
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 
 
 exit(0)
