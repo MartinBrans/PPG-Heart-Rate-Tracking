@@ -22,12 +22,26 @@ import numpy as np
 import scipy as sp
 
 import matplotlib.pyplot as plt
+SMALL_SIZE = 12
+MEDIUM_SIZE = 15
+BIGGER_SIZE = 30
+
+
+plt.rc('font', size=MEDIUM_SIZE)          # controls default text sizes
+plt.rc('axes', titlesize=MEDIUM_SIZE)     # fontsize of the axes title
+plt.rc('axes', labelsize=MEDIUM_SIZE)    # fontsize of the x and y labels
+plt.rc('xtick', labelsize=MEDIUM_SIZE)    # fontsize of the tick labels
+plt.rc('ytick', labelsize=MEDIUM_SIZE)    # fontsize of the tick labels
+plt.rc('legend', fontsize=SMALL_SIZE)    # legend fontsize
+plt.rc('figure', titlesize=BIGGER_SIZE)  # fontsize of the figure title
+
 from scipy.signal import find_peaks
 import pandas as pd
 import random
 import ctypes
 
 import heartpy as hp
+import biobss as bb # Doesn't work on Windows ? :'( -> On WSL/Linux it works
 
 ### Parameters begin ###
 
@@ -40,19 +54,24 @@ dataset = "troika"
 plotResults = True
 
 # Algo parameters
-scaling_on = False # True to enable a simple signal scaling on the ppg and acc signals, substracting the mean then dividing by (max-min)
+scaling_on = True # True to enable a simple signal scaling on the ppg and acc signals, substracting the mean then dividing by (max-min)
 filter_on = True # True to enable a scipy butterworth order 3 bandpass filter on ppg and acc signals
 minBeats = 2 # For algorithms based on signal peak detection. Assuming 40 BPM or lower is impossible, 8 seconds window -> 5 beats at least
 
 # Peak detection parameters for scipy find_peaks on ppg time-based signal:
 # findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code by KJStrand (troika dataset)
 # findPeaksArgsTime = {"prominence":9} # Fiddle for better perf on troika
-findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
-# findPeaksArgsTime = {"prominence":3} # Parameters testing with scaling on
+# findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
+# findPeaksArgsTime = {"height":0.05, "distance":35} # Parameters testing with scaling on
+# get_find_peaks_args_time = lambda fs: findPeaksArgsTime # Without dependencies on sampling frequency
+
+# With dependency on sampling frequency
+# get_find_peaks_args_time = lambda fs: {"height":0.16,"distance":int(60/214*fs)} # Distance such that 214 BPM max (close to KJStrand's)
+get_find_peaks_args_time = lambda fs: {"height":0.09,"distance":int(60/214*fs)} # Distance such that 214 BPM max (close to KJStrand's)
 
 # Peak detection parameters for scipy find_peaks on frequency signals (see FFT_Peak method)
-# Actually, KJStrand's implementation normalises the signal before applying fft, so probably no need for tweaks here
 findPeaksArgsFreq = {"height":30, "distance":1} # Parameters of the original github code by KJStrand (troika dataset)
+# Actually, KJStrand's implementation normalises the signal before applying fft, so probably no need for tweaks here
 
 ### Parameters end ###
 
@@ -219,7 +238,7 @@ def Evaluate(method):
         plt.ylabel("Error ($HR_{pred}-HR_{true}$) [BPM]")
         plt.legend()
         plt.title(f"{method}: Error vs. Ground Truth HR")
-        plt.savefig(f"./images/Err_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/Err_{method}.pdf")
         plt.close()
 
         plt.figure() # Error BPM vs ground truth BPM
@@ -238,7 +257,7 @@ def Evaluate(method):
         plt.ylabel("Prediction [BPM]")
         plt.legend()
         plt.title(f"{method}: Prediction vs. Ground Truth HR")
-        plt.savefig(f"./images/Pred_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/Pred_{method}.pdf")
         plt.close()
         
         plt.figure() # Error % vs ground truth BPM
@@ -249,7 +268,7 @@ def Evaluate(method):
         plt.xlabel("Ground truth HR [BPM]")
         plt.ylabel("Error [%]")
         plt.title(f"{method}")
-        plt.savefig(f"./images/PErr_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/PErr_{method}.pdf")
         plt.close()
 
         plt.figure() # Histogram error
@@ -258,7 +277,7 @@ def Evaluate(method):
         plt.xlabel("Error [BPM]")
         plt.ylabel("Occurences")
         plt.title(f"{method}")
-        plt.savefig(f"./images/Hist_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/Hist_{method}.pdf")
         plt.close()
 
         plt.figure() # Zoomed histogram error
@@ -267,7 +286,7 @@ def Evaluate(method):
         plt.xlabel("Error [BPM]")
         plt.ylabel("Occurences")
         plt.title(f"{method}")
-        plt.savefig(f"./images/ZHist_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/ZHist_{method}.pdf")
         plt.close()
 
         plt.figure() # Histogram error %
@@ -276,7 +295,7 @@ def Evaluate(method):
         plt.xlabel("Error [%]")
         plt.ylabel("Occurences")
         plt.title(f"{method}")
-        plt.savefig(f"./images/PHist_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/PHist_{method}.pdf")
         plt.close()
 
         plt.figure() # Zommed histogram error %
@@ -285,7 +304,7 @@ def Evaluate(method):
         plt.xlabel("Error [%]")
         plt.ylabel("Occurences")
         plt.title(f"{method}")
-        plt.savefig(f"./images/PZHist_{method}.pdf")
+        plt.savefig(f"./images/{dataset}/PZHist_{method}.pdf")
         plt.close()
 
     return AggregateErrorMetric(errs, trths, confs)
@@ -420,32 +439,37 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             prediction: Tuple of (BPM prediction, confidence) for this window.
     '''
     
-    global findPeaksArgsTime
+    global get_find_peaks_args_time
     global findPeaksArgsFreq
     global filter_on
     global scaling_on
 
-    if scaling_on:
+    # Preprocessing
+    if filter_on and scaling_on:
+        ppg_preproc = ScaleSignal(BandpassFilter(ppg, fs=Fs))
+        accx_preproc = ScaleSignal(BandpassFilter(accx, fs=Fs))
+        accy_preproc = ScaleSignal(BandpassFilter(accy, fs=Fs))
+        accz_preproc = ScaleSignal(BandpassFilter(accz, fs=Fs))
+    elif scaling_on:
         ppg = ScaleSignal(ppg)
         accx = ScaleSignal(accx)
         accy = ScaleSignal(accy)
         accz = ScaleSignal(accz)
-
-    if filter_on:
-        ppg_bandpass = BandpassFilter(ppg, fs=Fs)
-        accx_bandpass = BandpassFilter(accx, fs=Fs)
-        accy_bandpass = BandpassFilter(accy, fs=Fs)
-        accz_bandpass = BandpassFilter(accz, fs=Fs)
+    elif filter_on:
+        ppg_preproc = BandpassFilter(ppg, fs=Fs)
+        accx_preproc = BandpassFilter(accx, fs=Fs)
+        accy_preproc = BandpassFilter(accy, fs=Fs)
+        accz_preproc = BandpassFilter(accz, fs=Fs)
     else:
-        ppg_bandpass = ppg
-        accx_bandpass = accx
-        accy_bandpass = accy
-        accz_bandpass = accz
+        ppg_preproc = ppg
+        accx_preproc = accx
+        accy_preproc = accy
+        accz_preproc = accz
 
     # Aggregate accelerometer data into single signal
     
-    accy_mean = accy-np.mean(accy_bandpass) # Center Y values
-    acc_mag_unfiltered = np.sqrt(accx_bandpass**2+accy_mean**2+accz_bandpass**2)
+    accy_mean = accy-np.mean(accy_preproc) # Center Y values
+    acc_mag_unfiltered = np.sqrt(accx_preproc**2+accy_mean**2+accz_preproc**2)
     acc_mag = BandpassFilter(acc_mag_unfiltered, fs=Fs)
     
     prediction = 0
@@ -453,21 +477,10 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
     if method == "FFT_Peak":
 
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0]
-    
-        if verbose:
-            _, (ax1, ax2) = plt.subplots(1, 2, figsize=(15,4))
-            ax1.title.set_text('Signal with Time Domain FindPeaks()')
-            ax1.plot(ppg_bandpass)
-            ax1.plot(peaks, ppg_bandpass[peaks], "x")
-            
-            ax2.title.set_text('Aggregated Accelerometer Data')
-            ax2.plot(acc_mag, color="purple")
-            # plt.show()
-            plt.savefig("./images/plot.png")
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0]
             
         # Use FFT length larger than the input signal size for higher spectral resolution.
-        fft_len=len(ppg_bandpass)*4
+        fft_len=len(ppg_preproc)*4
 
         # Create an array of frequency bins
         freqs = np.fft.rfftfreq(fft_len, 1 / Fs) # bins of width 0.12207031
@@ -475,7 +488,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
         # The frequencies between 40 BPM and 240 BPM Hz
         low_freqs = (freqs >= (40/60)) & (freqs <= (240/60))
         
-        mag_freq_ppg, fft_ppg = FreqTransform(ppg_bandpass, freqs, low_freqs, fft_len)
+        mag_freq_ppg, fft_ppg = FreqTransform(ppg_preproc, freqs, low_freqs, fft_len)
         mag_freq_acc, _ = FreqTransform(acc_mag, freqs, low_freqs, fft_len)
         
         peaks_ppg = find_peaks(mag_freq_ppg, **findPeaksArgsFreq)[0]
@@ -488,17 +501,6 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
         # Use the frequency peak with the highest magnitude.
         if len(sorted_freq_peaks_ppg) > 0 :
             use_peak = sorted_freq_peaks_ppg[0]
-            # With this method, we do not use acc signal (with the next one we do)
-            # for i in range(len(sorted_freq_peaks_ppg)):
-            #     # Check nearest two peaks also
-            #     cond1 = sorted_freq_peaks_ppg[i] in sorted_freq_peaks_acc
-            #     cond2 = sorted_freq_peaks_ppg[i]-1 in sorted_freq_peaks_acc
-            #     cond3 = sorted_freq_peaks_ppg[i]+1 in sorted_freq_peaks_acc
-            #     if cond1 or cond2 or cond3:
-            #         continue
-            #     else:
-            #         use_peak = sorted_freq_peaks_ppg[i]
-            #         break
 
             chosen_freq = freqs[low_freqs][use_peak]
             prediction = chosen_freq * 60
@@ -507,62 +509,48 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             print("No freq")
             use_peak = 0
             chosen_freq = 0
-        
-        if verbose:
-            plt.title("PPG Frequency Magnitude")
-            plt.plot(mag_freq_ppg)
-            plt.plot(peaks_ppg, mag_freq_ppg[peaks_ppg], "x")
-            plt.show()
-            
-            plt.title("ACC Frequency Magnitude")
-            plt.plot(mag_freq_acc, color="purple")
-            plt.plot(peaks_acc, mag_freq_acc[peaks_acc], "x")
-            plt.show()
-            
-            print("PPG Freq Peaks: ", peaks_ppg)
-            print("ACC Freq Peaks: ", peaks_acc)
-            
-            print("PPG Freq Peaks Sorted: ", sorted_freq_peaks_ppg)
-            print("ACC Freq Peaks Sorted: ", sorted_freq_peaks_acc)
-            print("Use peak: ", use_peak)
-            print(f"Predicted BPM: {prediction}, {chosen_freq} (Hz), Confidence: {confidence}")
 
     elif method == "FFT_Peak_Acc":
 
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0]
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0]
     
         if verbose:
             _, (ax1, ax2) = plt.subplots(1, 2, figsize=(15,4))
             ax1.title.set_text('Signal with Time Domain FindPeaks()')
-            ax1.plot(ppg_bandpass)
-            ax1.plot(peaks, ppg_bandpass[peaks], "x")
+            ax1.plot(ppg_preproc)
+            ax1.plot(peaks, ppg_preproc[peaks], "x")
             
             ax2.title.set_text('Aggregated Accelerometer Data')
             ax2.plot(acc_mag, color="purple")
-            plt.show()
+            plt.savefig("./images/signal.pdf")
+            plt.close()
+            # plt.show()
             
         # Use FFT length larger than the input signal size for higher spectral resolution.
-        fft_len=len(ppg_bandpass)*4
+        fft_len=len(ppg_preproc)*4
 
         # Create an array of frequency bins
         freqs = np.fft.rfftfreq(fft_len, 1 / Fs) # bins of width 0.12207031
+        df = freqs[1]
 
         # The frequencies between 40 BPM and 240 BPM Hz
         low_freqs = (freqs >= (40/60)) & (freqs <= (240/60))
-        
-        mag_freq_ppg, fft_ppg = FreqTransform(ppg_bandpass, freqs, low_freqs, fft_len)
+        offset = freqs[low_freqs][0]
+
+        mag_freq_ppg, fft_ppg = FreqTransform(ppg_preproc, freqs, low_freqs, fft_len)
         mag_freq_acc, _ = FreqTransform(acc_mag, freqs, low_freqs, fft_len)
         
         peaks_ppg = find_peaks(mag_freq_ppg, **findPeaksArgsFreq)[0]
         peaks_acc = find_peaks(mag_freq_acc, **findPeaksArgsFreq)[0]
         
         # Sort peaks in order of peak magnitude
-        sorted_freq_peaks_ppg = sorted(peaks_ppg, key=lambda i:mag_freq_ppg[i], reverse=True)
-        sorted_freq_peaks_acc = sorted(peaks_acc, key=lambda i:mag_freq_acc[i], reverse=True)
+        sorted_freq_peaks_ppg = np.array(sorted(peaks_ppg, key=lambda i:mag_freq_ppg[i], reverse=True))
+        sorted_freq_peaks_acc = np.array(sorted(peaks_acc, key=lambda i:mag_freq_acc[i], reverse=True))
         
         # Use the frequency peak with the highest magnitude, unless the peak is also present in the accelerometer peaks.
         if len(sorted_freq_peaks_ppg) > 0 :
             use_peak = sorted_freq_peaks_ppg[0]
+            use_i = 0
             for i in range(len(sorted_freq_peaks_ppg)):
                 # Check nearest two peaks also
                 cond1 = sorted_freq_peaks_ppg[i] in sorted_freq_peaks_acc
@@ -572,6 +560,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                     continue
                 else:
                     use_peak = sorted_freq_peaks_ppg[i]
+                    use_i = i
                     break
 
             chosen_freq = freqs[low_freqs][use_peak]
@@ -583,15 +572,40 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             chosen_freq = 0
         
         if verbose:
-            plt.title("PPG Frequency Magnitude")
-            plt.plot(mag_freq_ppg)
-            plt.plot(peaks_ppg, mag_freq_ppg[peaks_ppg], "x")
-            plt.show()
+            plt.figure(figsize=(6.4,5))
+            plt.title("PPG Frequency Spectrum")
+            plt.plot(freqs[low_freqs], mag_freq_ppg,label="Spectrum magnitude")
+            plt.plot(peaks_ppg*df+offset, mag_freq_ppg[peaks_ppg], marker="x", linestyle="None", color="orange", markersize=8, label="Unused peaks")
+            plt.vlines(sorted_freq_peaks_ppg[:use_i]*df+offset,ymin=0,ymax=mag_freq_ppg[sorted_freq_peaks_ppg[:use_i]],colors="red",linestyles="dashed")
+            plt.plot(sorted_freq_peaks_ppg[:use_i]*df+offset, mag_freq_ppg[sorted_freq_peaks_ppg[:use_i]], "xr", markersize=8,label="Motion artefacts")
+            plt.vlines(use_peak*df+offset,ymin=0,ymax=mag_freq_ppg[use_peak], colors="green", linestyles="dashed")
+            plt.plot(use_peak*df+offset, mag_freq_ppg[use_peak], "xg", markersize=8, label="Used peak frequency")
+            plt.xlim(left=offset,right=freqs[low_freqs][-1])
+            plt.ylim(bottom=0)
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Spectrum magnitude")
+            plt.grid()
+            plt.legend()
+            plt.savefig("./images/PPG Freq.pdf")
+            plt.close()
+            # plt.show()
             
-            plt.title("ACC Frequency Magnitude")
-            plt.plot(mag_freq_acc, color="purple")
-            plt.plot(peaks_acc, mag_freq_acc[peaks_acc], "x")
-            plt.show()
+            plt.figure(figsize=(6.4,5))
+            plt.title("Acceleration Frequency Spectrum")
+            plt.plot(freqs[low_freqs], mag_freq_acc,color="purple",label="Spectrum magnitude")
+            plt.plot(peaks_acc*df+offset, mag_freq_acc[peaks_acc], marker="x", linestyle="None", color="orange", markersize=8)
+            plt.vlines(sorted_freq_peaks_ppg[:use_i]*df+offset,ymin=0,ymax=mag_freq_acc[sorted_freq_peaks_ppg[:use_i]],colors="red",linestyles="dashed")
+            plt.plot(sorted_freq_peaks_ppg[:use_i]*df+offset, mag_freq_acc[sorted_freq_peaks_ppg[:use_i]], "xr", markersize=8)
+            plt.vlines(use_peak*df+offset,ymin=0,ymax=mag_freq_acc[use_peak], colors="green", linestyles="dashed")
+            plt.plot(use_peak*df+offset, mag_freq_acc[use_peak], "xg", markersize=8)
+            plt.xlim(left=offset,right=freqs[low_freqs][-1])
+            plt.ylim(bottom=0)
+            plt.xlabel("Frequency [Hz]")
+            plt.ylabel("Spectrum magnitude")
+            plt.grid()
+            plt.savefig("./images/ACC Freq.pdf")
+            plt.close()
+            # plt.show()
             
             print("PPG Freq Peaks: ", peaks_ppg)
             print("ACC Freq Peaks: ", peaks_acc)
@@ -601,8 +615,21 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             print("Use peak: ", use_peak)
             print(f"Predicted BPM: {prediction}, {chosen_freq} (Hz), Confidence: {confidence}")      
 
+    elif method == "BIOBSS":
+        peaks = bb.ppgtools.ppg_detectpeaks(ppg_preproc, Fs, delta=5)["Peak_locs"] # Peaks are expressed as indices
+        print(peaks)
+        exit(0)
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = np.mean(Fs/np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1 # more intervals means more confidence -> actually punishes low BPMs for no reason
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
     elif method == "Peaktime_diff":
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0] # Peaks are expressed as indices
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0] # Peaks are expressed as indices
         if len(peaks) < minBeats : 
             # print("insufficient peaks")
             prediction = 0
@@ -613,7 +640,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
     elif method == "Peaktime_diff_PostMean":
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0] # Peaks are expressed as indices
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0] # Peaks are expressed as indices
         if len(peaks) < minBeats : 
             # print("insufficient peaks")
             prediction = 0
@@ -624,7 +651,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
     elif method == "Peaktime_diff_Median":
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0] # Peaks are expressed as indices
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0] # Peaks are expressed as indices
         if len(peaks) < minBeats : 
             # print("insufficient peaks")
             prediction = 0
@@ -635,15 +662,15 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
     elif method == "2thresh":
-        lowerThreshold = 0.0
-        upperThreshold = np.max(ppg_bandpass)*0.5
+        lowerThreshold = np.min(ppg_preproc)*0.15
+        upperThreshold = np.max(ppg_preproc)*0.15
         beatStarted = False
         beatComplete = False
         lastTime = 0
         prediction = 0
         nBeats = 0
-        for i in range(len(ppg_bandpass)) :
-            if ppg_bandpass[i] < lowerThreshold :
+        for i in range(len(ppg_preproc)) :
+            if ppg_preproc[i] < lowerThreshold :
                 if beatComplete :
                     prediction += Fs / (i-lastTime) * 60
                     beatComplete = False
@@ -652,7 +679,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                 if not beatStarted : 
                     lastTime = i
                     beatStarted = True
-            if ppg_bandpass[i] > upperThreshold and beatStarted :
+            if ppg_preproc[i] > upperThreshold and beatStarted :
                 beatComplete = True
         if nBeats > minBeats : 
             prediction /= nBeats # Outliers could influence the mean -> use median instead?
@@ -664,15 +691,15 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             confidence = 0.0
 
     elif method == "2thresh_PostMean":
-        lowerThreshold = 0.0
-        upperThreshold = np.max(ppg_bandpass)*0.5
+        lowerThreshold = np.min(ppg_preproc)*0.15
+        upperThreshold = np.max(ppg_preproc)*0.15
         beatStarted = False
         beatComplete = False
         lastTime = 0
         prediction = 0
         nBeats = 0
-        for i in range(len(ppg_bandpass)) :
-            if ppg_bandpass[i] < lowerThreshold :
+        for i in range(len(ppg_preproc)) :
+            if ppg_preproc[i] < lowerThreshold :
                 if beatComplete :
                     prediction += i-lastTime
                     beatComplete = False
@@ -681,7 +708,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                 if not beatStarted : 
                     lastTime = i
                     beatStarted = True
-            if ppg_bandpass[i] > upperThreshold and beatStarted :
+            if ppg_preproc[i] > upperThreshold and beatStarted :
                 beatComplete = True
         if nBeats > minBeats : 
             prediction = Fs / (prediction/nBeats) * 60 # Outliers could influence the mean -> use median instead?
@@ -693,15 +720,15 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             confidence = 0.0
 
     elif method == "2thresh_Median":
-        lowerThreshold = 0.0
-        upperThreshold = np.max(ppg_bandpass)*0.5
+        lowerThreshold = np.min(ppg_preproc)*0.15
+        upperThreshold = np.max(ppg_preproc)*0.15
         beatStarted = False
         beatComplete = False
         lastTime = 0
         prediction = []
         nBeats = 0
-        for i in range(len(ppg_bandpass)) :
-            if ppg_bandpass[i] < lowerThreshold :
+        for i in range(len(ppg_preproc)) :
+            if ppg_preproc[i] < lowerThreshold :
                 if beatComplete :
                     prediction.append(i-lastTime)
                     beatComplete = False
@@ -710,7 +737,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
                 if not beatStarted : 
                     lastTime = i
                     beatStarted = True
-            if ppg_bandpass[i] > upperThreshold and beatStarted :
+            if ppg_preproc[i] > upperThreshold and beatStarted :
                 beatComplete = True
         if nBeats > minBeats : 
             prediction = Fs / np.median(prediction,overwrite_input=True) * 60
@@ -722,8 +749,8 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             confidence = 0.0
 
     elif method == "NumberOfPeaks":
-        peaks = find_peaks(ppg_bandpass, **findPeaksArgsTime)[0]
-        prediction = len(peaks) / (len(ppg_bandpass)/Fs) * 60
+        peaks = find_peaks(ppg_preproc, **get_find_peaks_args_time(Fs))[0]
+        prediction = len(peaks) / (len(ppg_preproc)/Fs) * 60
         confidence = 1
         # confidence = 1 - 1/(len(peaks)+1) # more beats means more confidence -> actually punishes low BPMs for no reason, so do not use this
         if len(peaks) == 0 : 
@@ -773,12 +800,12 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
             for i in range(len(ppg)):
                 
-                # temp_ppg_bandpass = int((ppg_bandpass[i] - shift)*scaleFactor) + 2**31
-                temp_ppg_bandpass = int((ppg[i] - shift)*scaleFactor + 2**22)
+                # temp_ppg_preproc = int((ppg_preproc[i] - shift)*scaleFactor) + 2**31
+                temp_ppg_preproc = int((ppg[i] - shift)*scaleFactor + 2**22)
 
-                dinIR.value = temp_ppg_bandpass
-                dinRed.value = temp_ppg_bandpass
-                dinGreen.value = temp_ppg_bandpass
+                dinIR.value = temp_ppg_preproc
+                dinRed.value = temp_ppg_preproc
+                dinGreen.value = temp_ppg_preproc
                 ns.value = i
 
                 HRSpO2Func(dinIR,dinRed,dinGreen,ns,SampRate,compSpO2,
@@ -839,12 +866,12 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
             for i in range(len(ppg)):
                 
-                # temp_ppg_bandpass = int((ppg_bandpass[i] - shift)*scaleFactor) + 2**31
-                temp_ppg_bandpass = int((ppg[i] - shift)*scaleFactor + 2**22)
+                # temp_ppg_preproc = int((ppg_preproc[i] - shift)*scaleFactor) + 2**31
+                temp_ppg_preproc = int((ppg[i] - shift)*scaleFactor + 2**22)
 
-                dinIR.value = temp_ppg_bandpass
-                dinRed.value = temp_ppg_bandpass
-                dinGreen.value = temp_ppg_bandpass
+                dinIR.value = temp_ppg_preproc
+                dinRed.value = temp_ppg_preproc
+                dinGreen.value = temp_ppg_preproc
                 ns.value = i
 
                 HRSpO2Func(dinIR,dinRed,dinGreen,ns,SampRate,compSpO2,
@@ -867,10 +894,11 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
 
     elif method == "HeartPy" :
 
-        hp_preproc_ppg = hp.scale_data(ppg_bandpass)
-        # hp_preproc_ppg = hp.hampel_correcter(ppg,Fs)
+        # hp_preproc_ppg = ppg_preproc
+        hp_preproc_ppg = hp.scale_data(ppg_preproc)
+        # hp_preproc_ppg = hp.hampel_correcter(ppg,Fs) # Terrible, do not use...
         # hp_preproc_ppg = hp.filter_signal(hp_preproc_ppg,[0.5, 6],sample_rate=Fs,order=3,filtertype="bandpass")
-        # hp_preproc_ppg = hp.enhance_peaks(hp_preproc_ppg,iterations=2)
+        # hp_preproc_ppg = hp.enhance_peaks(hp_preproc_ppg,iterations=2) # Also terrible
 
 
         _, m = hp.process(hp_preproc_ppg, Fs)
@@ -953,70 +981,79 @@ def CalcConfidence(chosen_freq, freqs, fft_ppg):
     
     return conf_val
 
+### Evaluate on all files in dataset ###
 
-# Test visualisation of capsobase dataset
-# data, ref = LoadCapnobaseDataFile("./datasets/capnobase/data/0009_8min_signal.csv","./datasets/capnobase/data/0009_8min_reference.csv")
-# print(data.shape)
-# print(ref.shape)
-# plt.figure()
-# peaks = find_peaks(data[2400:4800],**findPeaksArgsTime)[0]
-# plt.plot(data[2400:4800])
-# plt.plot(peaks,data[peaks+2400],"xg")
-# plt.savefig("./datatest.pdf")
-# plt.figure()
-# plt.plot(ref[100:150])
-# plt.savefig("./reftest.pdf")
-# exit(0)
 
-method = "FFT_Peak" # Apply FFT on the window and select most present frequency, convert this frequency to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "FFT_Peak" # Apply FFT on the window and select most present frequency, convert this frequency to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "BIOBSS" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "Peaktime_diff" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
 MAE = Evaluate(method)
 print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "2thresh" # Compute BPM values based on the duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again), take the mean of the BPM values
 MAE = Evaluate(method)
 print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "2thresh_PostMean" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "2thresh_Median" # Compute the median duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "NumberOfPeaks" # Compute the number of peaks in the window and convert it to a BPM using the length of the window
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "MAX FTHR" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "MAX FTHR Median" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff, take the median of the predictions
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "HeartPy" # HeartPy library
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "random" # Pick a BPM at random between 40 and 240 BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "2thresh_PostMean" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "2thresh_Median" # Compute the median duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "NumberOfPeaks" # Compute the number of peaks in the window and convert it to a BPM using the length of the window
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "MAX FTHR" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "MAX FTHR Median" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff, take the median of the predictions
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "HeartPy" # HeartPy library
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "random" # Pick a BPM at random between 40 and 240 BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 
 
 exit(0)
 
-# **Analyze Single Window of PPG and Accelerometer Data**
-# 
-# Sample window analysis shown below:
+
+#### CapnoBase Single Window Visualisation ###
+
+# Test visualisation of capsobase dataset
+data, ref = LoadCapnobaseDataFile("./datasets/capnobase/data/0009_8min_signal.csv","./datasets/capnobase/data/0009_8min_reference.csv")
+# print(data.shape)
+# print(ref.shape)
+data= data[2400:4800]
+data = ScaleSignal(BandpassFilter(data, fs=300))
+ref = ref[:,100:150]
+plt.figure()
+peaks = find_peaks(data,**get_find_peaks_args_time(300))[0]
+plt.plot(data)
+plt.plot(peaks,data[peaks],"xg")
+plt.savefig("./test-data.pdf")
+plt.close()
+plt.figure()
+plt.plot(ref[0],ref[1])
+plt.savefig("./test-ref.pdf")
+plt.close()
+exit(0)
 
 
-# Single Window Test
+#### TROIKA Single Window Visualisation ###
 
 data_fls, ref_fls = LoadTroikaDataset()
 
@@ -1038,7 +1075,7 @@ winShift = 2*Fs # Successive ground truth windows overlap by 2 seconds
 eval_window_idx = 58
 
 # Choose method
-method = "HeartPy"
+method = "BIOBSS"
 
 
 offset = eval_window_idx*winShift
@@ -1049,6 +1086,7 @@ offset += winShift
 
 print(f"Win start,end: {window_start}, {window_end}")
 ppg_window = ppg[window_start:window_end]
+# ppg_window = ScaleSignal(BandpassFilter(ppg_window, Fs))
 
 accx_window = accx[window_start:window_end]
 accy_window = accy[window_start:window_end]
@@ -1056,9 +1094,12 @@ accz_window = accz[window_start:window_end]
 
 # plt.figure()
 # plt.plot(ppg_window)
-# plt.savefig("./buggy_window.pdf")
+# peaks = find_peaks(ppg_window, **get_find_peaks_args_time(Fs))[0]
+# plt.plot(peaks, ppg_window[peaks],"x")
+# plt.savefig("./test.pdf")
+# plt.close()
 
-pred, conf = AnalyzeWindow(ppg_window, accx_window, accy_window, accz_window, method, Fs=Fs, verbose=False)
+pred, conf = AnalyzeWindow(ppg_window, accx_window, accy_window, accz_window, method, Fs=Fs, verbose=True)
 
 groundTruthBPM = ref['BPM0'][eval_window_idx][0]
 print('Ground Truth BPM: ', groundTruthBPM)

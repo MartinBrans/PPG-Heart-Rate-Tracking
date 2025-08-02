@@ -1,4 +1,5 @@
 test*
 libtest.so
 images
-out.txt
+out*
+pulse_rate.ipynb
