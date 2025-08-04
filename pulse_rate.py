@@ -60,18 +60,21 @@ minBeats = 2 # For algorithms based on signal peak detection. Assuming 40 BPM or
 
 # Peak detection parameters for scipy find_peaks on ppg time-based signal:
 # findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code by KJStrand (troika dataset)
-# findPeaksArgsTime = {"prominence":9} # Fiddle for better perf on troika
+# findPeaksArgsTime = {"prominence":9} # Fiddle for better perf on troika (not conclusive...)
 # findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
-# findPeaksArgsTime = {"height":0.05, "distance":35} # Parameters testing with scaling on
 # get_find_peaks_args_time = lambda fs: findPeaksArgsTime # Without dependencies on sampling frequency
 
 # With dependency on sampling frequency
-# get_find_peaks_args_time = lambda fs: {"height":0.16,"distance":int(60/214*fs)} # Distance such that 214 BPM max (close to KJStrand's)
-get_find_peaks_args_time = lambda fs: {"height":0.09,"distance":int(60/214*fs)} # Distance such that 214 BPM max (close to KJStrand's)
+# Distance such that 214 BPM max (close to KJStrand's)
+# get_find_peaks_args_time = lambda fs: {"height":0.16,"distance":int(60/214*fs)} # Works best on capnobase
+# get_find_peaks_args_time = lambda fs: {"height":0.09,"distance":int(60/214*fs)} # Works best on troika
+get_find_peaks_args_time = lambda fs: {"height":0.125,"distance":int(60/214*fs)} # Tradeoff troika-capnobase
 
 # Peak detection parameters for scipy find_peaks on frequency signals (see FFT_Peak method)
 findPeaksArgsFreq = {"height":30, "distance":1} # Parameters of the original github code by KJStrand (troika dataset)
 # Actually, KJStrand's implementation normalises the signal before applying fft, so probably no need for tweaks here
+
+peakdetDelta = 0.03
 
 ### Parameters end ###
 
@@ -615,17 +618,70 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             print("Use peak: ", use_peak)
             print(f"Predicted BPM: {prediction}, {chosen_freq} (Hz), Confidence: {confidence}")      
 
-    elif method == "BIOBSS":
-        peaks = bb.ppgtools.ppg_detectpeaks(ppg_preproc, Fs, delta=5)["Peak_locs"] # Peaks are expressed as indices
-        print(peaks)
-        exit(0)
+    elif method == "BIOBSS Peaks":
+        peaks = bb.ppgtools.ppg_detectpeaks(ppg_preproc, Fs, delta=peakdetDelta)["Peak_locs"] # Peaks are expressed as indices
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = Fs/np.mean(np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1 
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
+    elif method == "BIOBSS Peaks PostMean":
+        peaks = bb.ppgtools.ppg_detectpeaks(ppg_preproc, Fs, delta=peakdetDelta)["Peak_locs"] # Peaks are expressed as indices
         if len(peaks) < minBeats : 
             # print("insufficient peaks")
             prediction = 0
             confidence = 0
         else :
             prediction = np.mean(Fs/np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
-            confidence = 1 # more intervals means more confidence -> actually punishes low BPMs for no reason
+            confidence = 1 
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
+    elif method == "BIOBSS Peaks Median":
+        peaks = bb.ppgtools.ppg_detectpeaks(ppg_preproc, Fs, delta=peakdetDelta)["Peak_locs"] # Peaks are expressed as indices
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = Fs/np.median(np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
+    elif method == "BIOBSS Beats":
+        peaks = bb.ppgtools.ppg_detectbeats(ppg_preproc, Fs, delta=peakdetDelta) # Peaks are expressed as indices
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = Fs/np.mean(np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1 
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
+    elif method == "BIOBSS Beats PostMean":
+        peaks = bb.ppgtools.ppg_detectbeats(ppg_preproc, Fs, delta=peakdetDelta) # Peaks are expressed as indices
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = np.mean(Fs/np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1 
+            # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
+
+    elif method == "BIOBSS Beats Median":
+        peaks = bb.ppgtools.ppg_detectbeats(ppg_preproc, Fs, delta=peakdetDelta) # Peaks are expressed as indices
+        if len(peaks) < minBeats : 
+            # print("insufficient peaks")
+            prediction = 0
+            confidence = 0
+        else :
+            prediction = Fs/np.median(np.diff(peaks)) * 60 # Outliers could influence the mean -> use median instead?
+            confidence = 1
             # confidence = 1 - 1/len(peaks) # more intervals means more confidence -> actually punishes low BPMs for no reason, so do not use this
 
     elif method == "Peaktime_diff":
@@ -990,21 +1046,35 @@ def CalcConfidence(chosen_freq, freqs, fft_ppg):
 # method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-# method = "BIOBSS" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
-# MAE = Evaluate(method)
-# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "BIOBSS Peaks" # Use BIOBSS Peak detection, take the mean between peaks and convert it into a BPM
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "BIOBSS Peaks PostMean" # Use BIOBSS Peak detection, convert time between peaks into BPM values and take the mean of the BPM values
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "BIOBSS Peaks Median" #  Use BIOBSS Peak detection, convert time between peaks into BPM values and take the take the median of the BPM values
+MAE = Evaluate(method)
+method = "BIOBSS Beats" # Use BIOBSS Peak detection, take the mean between peaks and convert it into a BPM
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "BIOBSS Beats PostMean" # Use BIOBSS Peak detection, convert time between peaks into BPM values and take the mean of the BPM values
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "BIOBSS Beats Median" #  Use BIOBSS Peak detection, convert time between peaks into BPM values and take the take the median of the BPM values
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 method = "Peaktime_diff" # Compute BPM values based on the time difference between two consecutive peaks, take the mean of the BPM values
 MAE = Evaluate(method)
 print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-# method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
-# MAE = Evaluate(method)
-# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-# method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
-# MAE = Evaluate(method)
-# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
-method = "2thresh" # Compute BPM values based on the duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again), take the mean of the BPM values
+method = "Peaktime_diff_PostMean" # Compute the mean time difference between peak occurences and convert it to a BPM
 MAE = Evaluate(method)
 print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+method = "Peaktime_diff_Median" # Compute the median time difference between peak occurences and convert it to a BPM
+MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
+# method = "2thresh" # Compute BPM values based on the duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again), take the mean of the BPM values
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
 # method = "2thresh_PostMean" # Compute the mean duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: {MAE[0]:.2f}, {MAE[1]*100:.2f}")
@@ -1034,23 +1104,33 @@ exit(0)
 #### CapnoBase Single Window Visualisation ###
 
 # Test visualisation of capsobase dataset
-data, ref = LoadCapnobaseDataFile("./datasets/capnobase/data/0009_8min_signal.csv","./datasets/capnobase/data/0009_8min_reference.csv")
-# print(data.shape)
-# print(ref.shape)
-data= data[2400:4800]
-data = ScaleSignal(BandpassFilter(data, fs=300))
-ref = ref[:,100:150]
-plt.figure()
-peaks = find_peaks(data,**get_find_peaks_args_time(300))[0]
-plt.plot(data)
-plt.plot(peaks,data[peaks],"xg")
-plt.savefig("./test-data.pdf")
-plt.close()
-plt.figure()
-plt.plot(ref[0],ref[1])
-plt.savefig("./test-ref.pdf")
-plt.close()
-exit(0)
+# data, ref = LoadCapnobaseDataFile("./datasets/capnobase/data/0009_8min_signal.csv","./datasets/capnobase/data/0009_8min_reference.csv")
+# # print(data.shape)
+# # print(ref.shape)
+# data= data[5000:7400]
+# data = ScaleSignal(BandpassFilter(data, fs=300))
+# peaks = find_peaks(data, **get_find_peaks_args_time(300))[0]
+# print(peaks)
+# peaks = bb.ppgtools.ppg_detectpeaks(data, 300, delta=0.01)
+# print(peaks["Peak_locs"])
+
+
+# print(bb.ppgtools.from_cycles(data,peaks["Peak_locs"], peaks["Trough_locs"], 300)["ppg_PR_mean"])
+# print(60*300/np.mean(np.diff(peaks["Peak_locs"])))
+
+# ref = ref[:,ref[0] <= 8]
+# print(np.mean(ref[1]))
+# plt.figure()
+# peaks = find_peaks(data,**get_find_peaks_args_time(300))[0]
+# plt.plot(data)
+# plt.plot(peaks,data[peaks],"xg")
+# plt.savefig("./test-data.pdf")
+# plt.close()
+# plt.figure()
+# plt.plot(ref[0],ref[1])
+# plt.savefig("./test-ref.pdf")
+# plt.close()
+# exit(0)
 
 
 #### TROIKA Single Window Visualisation ###
@@ -1075,7 +1155,7 @@ winShift = 2*Fs # Successive ground truth windows overlap by 2 seconds
 eval_window_idx = 58
 
 # Choose method
-method = "BIOBSS"
+method = "BIOBSS Peaks"
 
 
 offset = eval_window_idx*winShift
@@ -1086,7 +1166,20 @@ offset += winShift
 
 print(f"Win start,end: {window_start}, {window_end}")
 ppg_window = ppg[window_start:window_end]
-# ppg_window = ScaleSignal(BandpassFilter(ppg_window, Fs))
+ppg_window = ScaleSignal(BandpassFilter(ppg_window, Fs))
+
+# peaks = find_peaks(ppg_window, **get_find_peaks_args_time(125))[0]
+# beats = bb.ppgtools.ppg_detectbeats(ppg_window, 125, method="scipy")
+# print(beats)
+# peaks = bb.ppgtools.ppg_detectpeaks(ppg_window, 125, method="scipy")
+# print(peaks["Peak_locs"])
+
+
+# print(bb.ppgtools.from_cycles(ppg_window,peaks["Peak_locs"], peaks["Trough_locs"], 125)["ppg_PR_mean"])
+# print(60*125/np.mean(np.diff(peaks["Peak_locs"])))
+# print(60*125/np.mean(np.diff(beats)))
+# print(ref['BPM0'][eval_window_idx][0])
+
 
 accx_window = accx[window_start:window_end]
 accy_window = accy[window_start:window_end]
