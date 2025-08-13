@@ -1,17 +1,29 @@
+# Inspired from KJStrand's Pulse_Rate_Estimation https://github.com/KJStrand/Pulse_Rate_Estimation
+# Code structure:
+#   Imports
+#   Algorithm parameters
+#   Function definitions:
+#       Loading datasets
+#       Evaluate(): Evaluating an algorithm on a dataset (returns error metric and plots graphs)
+#       RunPulseRateAlgorithm(): Evaluating an algorithm on a file from a dataset
+#       AnalyzeWindow(): Predict heart rate with an algorithm on a PPG signal window. 
+#        This is where the different algorithms are defined.
+#       Utils (scaling, filtering, applying FFT, ...)
+#   Launching the evaluation of the algorithms
+#   Analyzing a single window, visualizing the datasets
 
 # ## Part 1: Pulse Rate Algorithm
 # 
 # ### Dataset
 # **Troika**[1] dataset is used to develop the motion-compensated pulse rate algorithm.
-# **Capnobase** is used to confirm that an algorithm works on 
+# **Capnobase** is used to confirm that an algorithm works on clean data.
+# Troika has accelerometer data to help for motion compensation, but CapnoBase does not. CapnoBase has no motion artefacts anyway.
 # 
 # 1. Zhilin Zhang, Zhouyue Pi, Benyuan Liu, ‘‘TROIKA: A General Framework for Heart Rate Monitoring Using Wrist-Type Photoplethysmographic Signals During Intensive Physical Exercise,’’IEEE Trans. on Biomedical Engineering, vol. 62, no. 2, pp. 522-531, February 2015. Link
 # 
 # 2. W. Karlen, S. Raman, J. M. Ansermino and G. A. Dumont, "Multiparameter Respiratory Rate Estimation From the Photoplethysmogram," in IEEE Transactions on Biomedical Engineering, vol. 60, no. 7, pp. 1946-1953, July 2013, doi: 10.1109/TBME.2013.2246160.
 # -----
 
-
-# https://github.com/scipy/scipy/blob/v1.11.2/scipy/signal/_peak_finding.py#L729-L1010
 
 # ### Code
 
@@ -24,7 +36,7 @@ import scipy as sp
 import matplotlib.pyplot as plt
 SMALL_SIZE = 12
 MEDIUM_SIZE = 15
-BIGGER_SIZE = 30
+BIGGER_SIZE = 25
 
 
 plt.rc('font', size=MEDIUM_SIZE)          # controls default text sizes
@@ -49,48 +61,50 @@ import biobss as bb # Doesn't work on Windows ? :'( -> On WSL/Linux it works
 
 # Don't bother reading these parameters if you haven't read the rest of the code first
 
-# Uncomment to turn warnings into errors
 import warnings
-warnings.simplefilter("ignore") # Disable warnings caused by HeartPy
+warnings.simplefilter("ignore") # Disables warnings caused by HeartPy
 
+# Choose the dataset
 dataset = "capnobase"
-dataset = "troika"
+# dataset = "troika"
 plotResults = True
 
-# Algo parameters
+# Algorithm parameters
 scaling_on = True # True to enable a simple signal scaling on the ppg and acc signals, substracting the mean then dividing by (max-min)
 filter_on = True # True to enable a scipy butterworth order 3 bandpass filter on ppg and acc signals
-minBeats = 2 # For algorithms based on signal peak detection. Assuming 40 BPM or lower is impossible, 8 seconds window -> 5 beats at least
+minBeats = 2 # For algorithms based on signal peak detection.
 
-# Peak detection parameters for scipy find_peaks on ppg time-based signal:
+### Peak detection parameters for scipy find_peaks on ppg time-based signal:
+## Without dependencies on sampling frequency (deprecated). Uncomment one of the first three and the fourth line
 # findPeaksArgsTime = {"height":10, "distance":35} # Parameters of the original github code by KJStrand (troika dataset)
 # findPeaksArgsTime = {"prominence":9} # Fiddle for better perf on troika (not conclusive...)
 # findPeaksArgsTime = {"prominence":3} # Parameters that seem good for capnobase dataset
-# get_find_peaks_args_time = lambda fs: findPeaksArgsTime # Without dependencies on sampling frequency
-
-# With dependency on sampling frequency
-# Distance such that 185 BPM max
-get_find_peaks_args_time = lambda fs: {"height":0.7,"distance":int(60/200*fs)} # Works best on capnobase
-get_find_peaks_args_time = lambda fs: {"height":0.00,"distance":int(60/200*fs)} # Works best on troika
-# get_find_peaks_args_time = lambda fs: {"height":0.3,"distance":int(60/200*fs)} # Tradeoff troika-capnobase
+# get_find_peaks_args_time = lambda fs: findPeaksArgsTime 
+## With dependency on sampling frequency. Uncomment one of the three
+## Distance such that 185 BPM max
+# get_find_peaks_args_time = lambda fs: {"height":0.7,"distance":int(60/200*fs)} # Works best on capnobase
+# get_find_peaks_args_time = lambda fs: {"height":0.00,"distance":int(60/200*fs)} # Works best on troika
+get_find_peaks_args_time = lambda fs: {"height":0.3,"distance":int(60/200*fs)} # Tradeoff troika-capnobase
 
 # Peak detection parameters for scipy find_peaks on frequency signals (see FFT_Peak method)
 findPeaksArgsFreq = {"height":185} # Parameters of the original github code by KJStrand (troika dataset)
 
+# Biobss parameters
 # Optimised for CapnoBase
-biobssPeakDelta = 0.8 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
-biobssBeatDelta = 0.07 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+# biobssPeakDelta = 0.8 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+# biobssBeatDelta = 0.07 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
 # Optimised for Troika
-biobssPeakDelta = 0.5 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
-biobssBeatDelta = 0.13 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+# biobssPeakDelta = 0.5 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+# biobssBeatDelta = 0.13 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
 # Tradeoff
-# biobssPeakDelta = 0.65 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
-# biobssBeatDelta = 0.09 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+biobssPeakDelta = 0.65 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
+biobssBeatDelta = 0.09 # delta parameter for BIOBSS' peakdet method, when using ppg_detectpeaks
 
 # Tsai's "2thresh" threshold
-threshTsai = 0.6 # Capno
-threshTsai = 0.7 # Troika
-# threshTsai = 0.65 # Tradeoff
+# From https://github.com/Mic-Tsai/Sensor_PPG_MAX30102
+# threshTsai = 0.6 # Capno
+# threshTsai = 0.7 # Troika
+threshTsai = 0.65 # Tradeoff
 
 zThresh = 2 # Outlier removal for HR computations based on peaks
 
@@ -117,12 +131,15 @@ def HRSpO2Func(dinIR,dinRed,dinGreen,ns,SampRate,compSpO2,
 def LoadCapnobaseDataset():
     """Retrieve the filenames of the Capnobase dataset, located at ./datasets/capnobase/data"""
     data_dir = "./datasets/capnobase/data"
+    # Data without any artefacts
     data_fls = sorted(glob.glob(data_dir + "/*_signal.csv"))
     ref_fls = sorted(glob.glob(data_dir + "/*_reference.csv"))
-    # data_fls = sorted(glob.glob(data_dir + "/*_signal.csv")+glob.glob(data_dir+"/data_with_artifs/*_signal.csv"))
-    # ref_fls = sorted(glob.glob(data_dir + "/*_reference.csv")+glob.glob(data_dir+"/data_with_artifs/*_reference.csv"))
+    # Data with a few artefacts
     # data_fls = sorted(glob.glob(data_dir+"/data_with_artifs/*_signal.csv"))
     # ref_fls = sorted(glob.glob(data_dir+"/data_with_artifs/*_reference.csv"))
+    # Both
+    # data_fls = sorted(glob.glob(data_dir + "/*_signal.csv")+glob.glob(data_dir+"/data_with_artifs/*_signal.csv"))
+    # ref_fls = sorted(glob.glob(data_dir + "/*_reference.csv")+glob.glob(data_dir+"/data_with_artifs/*_reference.csv"))
     return data_fls, ref_fls
 
 def LoadCapnobaseDataFile(data_fl,ref_fl):
@@ -132,7 +149,6 @@ def LoadCapnobaseDataFile(data_fl,ref_fl):
     Returns: two numpy arrays, the first is the signal, the second is the reference
     """
     data = pd.read_csv(data_fl)["pleth_y"].to_numpy()
-    # ref = np.array(pd.read_csv(ref_fl)["hr_ecg_y"].to_numpy()[0].split(" ")[1:],dtype=np.float64)
     temp = pd.read_csv(ref_fl)
     hrX = np.array(temp["hr_ecg_x"].to_numpy()[0].split(" ")[1:],dtype=np.float64)
     hrY = np.array(temp["hr_ecg_y"].to_numpy()[0].split(" ")[1:],dtype=np.float64)
@@ -199,7 +215,7 @@ def AggregateErrorMetric(pr_errors, gnd_truths, confidence_est):
     # return np.sqrt(np.mean(best_estimates**2)) # RMS
     # return np.mean(100*np.abs(best_estimates)/best_truths) # in percents
     # return (np.mean(np.abs(best_estimates)),np.mean(np.abs(best_estimates)/best_truths)) # both
-    return (np.mean(np.abs(pr_errors)),np.mean(np.abs(pr_errors)/gnd_truths)) # both but without the 90 percentile shit
+    return (np.mean(np.abs(pr_errors)),np.mean(np.abs(pr_errors)/gnd_truths)) # both but without the 90 percentile stuff
     # return (np.median(np.abs(best_estimates)),np.median(np.abs(best_estimates)/best_truths)) # both medians
     # return (np.std(best_estimates),np.std(best_estimates/best_truths)) # both stds
 
@@ -248,8 +264,8 @@ def Evaluate(method):
     # plt.grid()
     # plt.xlabel("Ground truth BPM [BPM]")
     # plt.ylabel("Occurences")
-    # plt.title(f"Ground truth HR in CapnoBase")
-    # plt.savefig(f"./images/GTHR_{dataset}Artef.pdf")
+    # plt.title(f"Ground Truth HR in TROIKA")
+    # plt.savefig(f"./images/GTHR_troika.pdf")
     # plt.close()
 
     # Plots
@@ -364,7 +380,7 @@ def RunPulseRateAlgorithm(data_fl, ref_fl, method):
         ppg, ref = LoadCapnobaseDataFile(data_fl, ref_fl)
         # Resample to another frequency
         # targetFs = 125
-        # ppg = interp1d(np.arange(len(ppg))/Fs, ppg)(np.arange(0,len(ppg)*targetFs/Fs)/targetFs)
+        # ppg = interp1d(np.arange(len(ppg))/Fs, ppg)(np.arange(len(ppg)*targetFs/Fs)/targetFs)
         # Fs = targetFs
         accx = np.zeros_like(ppg)
         accy = accx
@@ -960,17 +976,17 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
             nPredictions = 0
             prediction = 0
 
-            scaleFactor = 2**30 / (ppg_bp_max-ppg_bp_min)
+            scaleFactor = 2**15 / (ppg_bp_max-ppg_bp_min)
             shift = (ppg_bp_max+ppg_bp_min)/2
             # print(shift)
             # print(scaleFactor)
 
-            ppg_MAX = (ppg_preproc - shift)*scaleFactor + 2**30
+            ppg_MAX = (ppg_preproc - shift)*scaleFactor + 2**18
             # if np.size(ppg_MAX[ppg_MAX < 0]) > 0 : print("Ca pue")
             # if np.size(ppg_MAX[ppg_MAX > 2**32-1]) > 0 : print("Ca pue")
 
             # Resample to 100 Hz
-            ppg_MAX = interp1d(np.arange(len(ppg_MAX))/Fs, ppg_MAX)(np.arange(0,len(ppg_MAX)*100/Fs)/100)
+            ppg_MAX = interp1d(np.arange(len(ppg_MAX))/Fs, ppg_MAX)(np.arange(len(ppg_MAX)*100/Fs)/100)
 
             for i in range(len(ppg_MAX)):
 
@@ -1096,7 +1112,7 @@ def AnalyzeWindow(ppg, accx, accy, accz, method, Fs=125, verbose=False):
     return (prediction, confidence)
 
 def ScaleSignal(x):
-    # x -= np.mean(x)
+    x -= np.mean(x)
     if np.std(x) > 1e-9 :
         return x/np.std(x)
     # if abs(max(x)-min(x)) > 1e-9 :
@@ -1161,9 +1177,9 @@ def CalcConfidence(chosen_freq, freqs, fft_ppg):
 # method = "FFT_Peak" # Apply FFT on the window and select most present frequency, convert this frequency to a BPM
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
-method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
-MAE = Evaluate(method)
-print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
+# method = "FFT_Peak_Acc" # (Original TROIKA code) Apply FFT and select most present frequency (+ remove matches with Accelerometer FFT), convert it to a BPM
+# MAE = Evaluate(method)
+# print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
 # method = "BIOBSS Peaks" # Use BIOBSS Peak detection, take the mean between peaks and convert it into a BPM
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
@@ -1221,9 +1237,9 @@ print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
 # method = "2thresh_Outlier" # Compute the median duration of a beat (one beat = hitting an lower threshold, then an upper, then the lower again) and convert it to a BPM
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
-# method = "MAX FTHR" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff
-# MAE = Evaluate(method)
-# print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
+method = "MAX FTHR" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff
+MAE = Evaluate(method)
+print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
 # method = "MAX FTHR Median" # Base algorithm on MAX32630 FTHR, with FIR filter, finger off detection and peaktime_diff, take the median of the predictions
 # MAE = Evaluate(method)
 # print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
@@ -1238,7 +1254,7 @@ print(f"Method : {method} =====\n MAE is: [{MAE[0]:.3f}],[{MAE[1]*100:.3f}]")
 exit(0)
 
 
-#### CapnoBase Single Window Visualisation ###
+#### Dataset Visualisations ###
 
 # Test visualisation of capsobase dataset
 # data, ref = LoadCapnobaseDataFile("./datasets/capnobase/data/0009_8min_signal.csv","./datasets/capnobase/data/0009_8min_reference.csv")
@@ -1269,6 +1285,71 @@ exit(0)
 # plt.close()
 # exit(0)
 
+# data = pd.read_csv("./datasets/capnobase/data/data_with_artifs/0016_8min_signal.csv")
+# Fs = 300
+# artefLoc = 138226 # from labels file
+# ppg = data["pleth_y"].to_numpy()[artefLoc-Fs*4:artefLoc+Fs*8+1]
+# ecg = data["ecg_y"].to_numpy()[artefLoc-Fs*4:artefLoc+Fs*8+1]
+# ppgBP = ScaleSignal(BandpassFilter(ppg, Fs))
+# ppg = ScaleSignal(ppg)
+# ecg = ScaleSignal(ecg)
+# x = np.arange(len(ppg))/Fs
+# fig, (ax1, ax2, ax3) = plt.subplots(3,1,sharex=True, figsize=(8,6))
+# ax1.plot(x,ecg,label="ECG")
+# ax2.plot(x,ppg,label="PPG",color="orange")
+# ax3.plot(x,ppgBP,label="Filtered PPG",color="green")
+# plt.xlim(left=x[0],right=x[-1])
+# # ax1.set_title("ECG")
+# # ax2.set_title("PPG")
+# # ax3.set_title("Filtered PPG")
+# ax1.set_ylim(top=9)
+# ax2.set_ylim(top=2.2)
+# ax3.set_ylim(top=3.8)
+# ax3.set_xlabel("Time [s]")
+# ax1.legend(loc="upper right")
+# ax2.legend(loc="upper right")
+# ax3.legend(loc="upper right")
+# ax1.grid()
+# ax2.grid()
+# ax3.grid()
+# fig.suptitle("Motion Artefact on CapnoBase Dataset")
+# fig.savefig("./images/artefsCapno.pdf")
+# plt.close()
+
+# exit(0)
+
+# data = sp.io.loadmat("./datasets/troika/training_data/DATA_01_TYPE01.mat")["sig"]
+# Fs = 125
+# artefLoc = 4519 # from labels file
+# ppg = data[2,artefLoc-Fs*4:artefLoc+Fs*4+1]
+# ecg = data[0,artefLoc-Fs*4:artefLoc+Fs*4+1]
+# ppgBP = ScaleSignal(BandpassFilter(ppg, Fs))
+# ppg = ScaleSignal(ppg)
+# ecg = ScaleSignal(ecg)
+# x = np.arange(len(ppg))/Fs
+# fig, (ax1, ax2, ax3) = plt.subplots(3,1,sharex=True, figsize=(8,6))
+# ax1.plot(x,ecg,label="ECG")
+# ax2.plot(x,ppg,label="PPG",color="orange")
+# ax3.plot(x,ppgBP,label="Filtered PPG",color="green")
+# plt.xlim(left=x[0],right=x[-1])
+# # ax1.set_title("ECG")
+# # ax2.set_title("PPG")
+# # ax3.set_title("Filtered PPG")
+# ax1.set_ylim(top=9)
+# ax2.set_ylim(top=2.8)
+# ax3.set_ylim(top=2.5)
+# ax3.set_xlabel("Time [s]")
+# ax1.legend(loc="upper right")
+# ax2.legend(loc="lower right")
+# ax3.legend(loc="lower right")
+# ax1.grid()
+# ax2.grid()
+# ax3.grid()
+# fig.suptitle("Motion Artefact on TROIKA Dataset")
+# fig.savefig("./images/artefsTroika.pdf")
+# plt.close()
+
+# exit(0)
 
 # data_fls, ref_fls = LoadTroikaDataset()
 
@@ -1376,56 +1457,4 @@ print('Ground Truth BPM: ', groundTruthBPM)
 
 predError = groundTruthBPM - pred
 print("Prediction Error: ", predError)
-
-
-# **Code Description**
-# 
-# The Python code may be used in two ways:
-# 
-# 1) Analyze algorithm performance on Troika dataset.
-# 
-# The function *RunPulseRateAlgorithm()* expects two files as input:
-# - data_fl: .mat file containing PPG and X, Y, Z accelerometer data from Troika dataset (or in Troika format)
-# - ref_fl: .mat file containing ground truth heart rates from Troika dataset (or in Troika format)
-#        
-# RunPulseRateAlgorithm() will compute the heart rate and confidence estimates for 8 second windows of the PPG and accelerometer data, and calculate the error (difference) between the heart estimates and the ground truth heart rate for each 8 second window provided in the reference file.
-# 
-# The function *Evaluate()* will calculate an overall mean absolute error at 90% availability (see Algorithm Performance section below), assuming the Troika data is located at *./datasets/troika/training_data*.
-# 
-# 2) Predict heart rate from new input PPG and Accelerometer data.
-# 
-# The function *AnalyzeWindow()* accepts numpy arrays of ppg, and accelerometer data in the x, y, and z axis, along with a sampling rate. A precondition of the function is that the incoming ppg and acceleromter data was sampled at the provided sampling rate and is aligned in time. While the algorithm was only tested with 8 second windows of PPG and accelerometer data and a sampling rate of 125 Hz, the AnalyzeWindow function may be applied to a longer window sizes or alternate sampling rates. AnalyzeWindow() returns a tuple of (BPM prediction, confidence) for the provided window of ppg and accelerometer data using the provided sample rate.
-# 
-# **Data Description**
-# 
-# The data used to design and test this algorithm was taken from the [TROIKA](https://ieeexplore.ieee.org/document/6905737) dataset. The dataset includes 12 subjects ages 18 to 35 with simultaneously recorded two-channel wrist-mounted PPG signals, wrist-mounted three-axis accelerometer signals, and one-channel chest-mounted ECG. The subjects ran on a treadmill at increasing rates to range from resting heart rate to intense exercise heart rate. To build a more complete dataset, it would be beneficial to include a greater number of participants that represent the broader population demographics for age and gender. Additionally, it would be useful to record PPG and accelerometer data from more points on the body that could be used in future wearable devices such as the feet, legs, upper arms, and head. This could provide a more complete picture of how accelerometer signals affect PPG data across the body. Alternative exercises could be recorded as well, such as cylcing, swimming, tennis, and weight lifting, each of which may produce different physiological responses or signal patterns.
-# 
-# **Algorithm Description**
-# 
-# The heart rate prediction algorithm takes advantage of the physiology of blood flow through the ventricles of the wrist. Light emitted by an LED on the PPG sensor is reflected less when the ventricles contract and more blood is present, and light is reflected more when the blood returns to the heart and fewer red blood cells are present. Arm movement will also affect the blood levels in the wrist, so periodic motion such as an arm swinging back and forth can also be detected by the PPG signal. 
-# 
-# The algorithm identifies the strongest frequency components of both the PPG signal and the accelerometer signals to determine which frequency to pick as the heart rate. The algorithm follows these stages:
-# 
-# 1) Apply bandpass filter to PPG and accelerometer signals to filter out frequencies outside of the 40-240 BPM range.
-# 
-# 2) Aggregate the X, Y, and Z channels of the accelerometer signal into a signal magnitude signal.
-# 
-# 2) Tranform the time domain PPG and accelerometer signal to magnitude frequency representations by taking the absolute value of their Fast Fourier Transforms.
-# 
-# 3) Using the frequency representations of PPG and accelerometer signals, find the peaks with the largest magnitudes, and choose one to be the predicted heart rate frequency.
-# 
-# - If the highest magnitude peak of both signals is different, choose the highest magnitude peak of the the PPG signal as the heart rate frequency prediction.
-# - If the highest magnitude peak of both signals is the same, this may mean that the arm swing signal is overpowering the pulse rate, so choose the next highest magnitude peak of the PPG signal as the heart rate frequency prediction.
-# - If each of the highest magnitude peaks of the PPG signal are too close to the peaks of the accelerometer signal, the arm swing frequency could be the same as the pulse rate frequency, so use the highest magnitude peak of the PPG as the heart rate frequency prediction, even though the accelerometer signal has the same peak).
-# 
-# 4) Convert the chosen peak frequency to a final **BPM Prediction**, and calculate a **Confidence Value** for the chosen frequency by computing the ratio of energy concentrated near that frequency compared to the full signal.
-# 
-# The BPM Prediction and Confidence Value outputs from this algorithm are not gauranteed to be correct. Confidence values are only used to determine which outputs are very poor, i.e. a low confidence value implies very low signal to noise ratio, since only a small amount of energy is concentrated by the predicted peak. High confidence values do not necessarily imply the that algorithm is significantly more correct, only that the peak at that location is responsible for much more of the signal. Common failure modes include when accelerometer data has random movement spikes or when the three channels combine into a non-periodic signal.
-# 
-# **Algorithm Performance**
-# 
-# The algorithm performance was evaluated against the TROIKA reference data. All PPG data was compared against ECG "ground truth" BPM for associated time windows. ECG measures electric potentials across the heart and is considered to be a much more reliable method for obtaining pulse rate than PPG since these electrical signals are not susceptible to the same levels of movement-related noise. Using the confidence estimates to compare prediction quality, the bottom 10% of predictions were discarded while the remaining predictions were evaluated against the ground truth. The final calculated performance metric for the dataset at 90% availability was a mean absolute error (**MAE**) of **13.625 BPM**. This performance may be verified by executing the *Evaluate()* function.
-# 
-# This algorithm may not perform as well at >90% availability, and does not gaurantee that consecutive or overlapping time windows have similar confidence values, so it is possible that prediction confidence could vary greatly over time if this algorithm was applied to a real-time heart rate analysis scenario. This algorithm also assumes that accelerometer motion will largely result from swinging arms during running on a treadmill and will therefore be consistently periodic. This may not be the case for other activities, such as tennis or basketball.
-
 

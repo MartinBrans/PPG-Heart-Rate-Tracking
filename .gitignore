@@ -2,4 +2,3 @@ test*
 libtest.so
 images
 out*
-pulse_rate.ipynb
